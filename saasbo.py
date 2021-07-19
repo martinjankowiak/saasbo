@@ -14,14 +14,13 @@ from numpyro.diagnostics import summary
 from jax import jit, vmap, value_and_grad
 from jax.scipy.linalg import cho_factor, cho_solve, solve_triangular
 from jax.scipy.stats import norm
+from jax.scipy.special import expit as jax_expit
 
 from numpyro.infer import MCMC, NUTS
 from numpyro.util import enable_x64
 from scipy.optimize import fmin_l_bfgs_b, minimize
 from scipy.special import logsumexp, logit, expit
 from torch.quasirandom import SobolEngine
-
-from jax.scipy.special import expit as jax_expit
 
 
 root_five = math.sqrt(5.0)
@@ -75,29 +74,41 @@ def matern_kernel(X, Z, var, inv_length_sq, noise, include_noise):
     return k  # N_X N_Z
 
 
-class GP(object):
+class SAASGP(object):
+    """
+    This class contains the necessary modeling and inference code to fit a gaussian process with a SAAS prior.
+    """
     def __init__(
         self,
-        alpha=0.1,
-        num_warmup=200,
-        num_samples=200,
-        max_tree_depth=8,
-        num_chains=1,
-        thinning=1,
-        proj_dim=0,
-        verbose=True,
-        learn_noise=True,
-        kernel="rbf"
+        alpha=0.1,                 # controls sparsity
+        num_warmup=200,            # number of HMC warmup samples
+        num_samples=200,           # number of post-warmup HMC samples
+        max_tree_depth=8,          # max tree depth used in NUTS
+        num_chains=1,              # number of MCMC chains
+        thinning=1,                # thinning > 1 reduces the computational cost at the risk of less robust model inferences
+        verbose=True,              # whether to use std out for verbose logging
+        observation_variance=0.0,  # observation variance to use; this is inferred if observation_variance==0.0
+        kernel="matern"            # GP kernel to use (matern or rbf)
     ):
-        self.alpha = alpha  # controls sparsity
-        self.num_warmup = num_warmup  # controls hmc
-        self.num_samples = num_samples  # controls hmc
-        self.max_tree_depth = max_tree_depth  # controls hmc
-        self.num_chains = num_chains  # controls hmc
+        if alpha <= 0.0:
+            raise ValueError("The hyperparameter alpha should be positive.")
+        if observation_variance < 0.0:
+            raise ValueError("The hyperparameter observation_variance should be non-negative.")
+        for i in [num_warmup, num_samples, max_tree_depth, num_chains, thinning]:
+            if not isinstance(i, int) or i <= 0:
+                raise ValueError("The hyperparameters num_warmup, num_samples, max_tree_depth, " +
+                                 "num_chains, and thinning should be positive integers.")
+
+        self.alpha = alpha
+        self.num_warmup = num_warmup
+        self.num_samples = num_samples
+        self.max_tree_depth = max_tree_depth
+        self.num_chains = num_chains
         self.kernel = rbf_kernel if kernel == "rbf" else matern_kernel
         self.thinning = thinning
         self.verbose = verbose
-        self.learn_noise = learn_noise
+        self.observation_variance = observation_variance
+        self.learn_noise = (observation_variance == 0.0)
         self.Ls = None
 
     def model(self, X, Y):
@@ -304,7 +315,7 @@ def main(args):
         N_train=args.num_data, P=args.P, seed=args.seed, sigma_obs=args.sigma_obs
     )
 
-    gp = GP(
+    gp = SAASGP(
         alpha=args.alpha,
         num_warmup=args.num_warmup,
         num_samples=args.num_samples,

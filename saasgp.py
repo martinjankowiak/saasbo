@@ -118,7 +118,8 @@ class SAASGP(object):
     def run_inference(self, rng_key, X, Y):
         start = time.time()
         kernel = NUTS(self.model, max_tree_depth=self.max_tree_depth)
-        mcmc = MCMC(kernel, self.num_warmup, self.num_samples, num_chains=self.num_chains, progress_bar=self.verbose)
+        mcmc = MCMC(kernel, num_warmup=self.num_warmup, num_samples=self.num_samples,
+                    num_chains=self.num_chains, progress_bar=self.verbose)
         mcmc.run(rng_key, X, Y)
 
         flat_samples = mcmc.get_samples(group_by_chain=False)
@@ -246,7 +247,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    assert numpyro.__version__.startswith("0.5")
+    assert numpyro.__version__.startswith("0.7")
     parser = argparse.ArgumentParser(description="We demonstrate how to fit a SAASGP.")
     parser.add_argument("-n", "--num-samples", default=128, type=int)
     parser.add_argument("--P", default=32, type=int, help="dimension of input space")

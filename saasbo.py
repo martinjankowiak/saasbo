@@ -188,7 +188,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    assert numpyro.__version__.startswith("0.5")
+    assert numpyro.__version__.startswith("0.7")
     parser = argparse.ArgumentParser(description="We demonstrate how to run SAASBO.")
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument("--max-evals", default=20, type=int)

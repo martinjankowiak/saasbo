@@ -81,8 +81,29 @@ def optimize_ei(y_target, gp, xi=0.0, n_restarts=1, n_init=1000, ei_y=False):
 
     return x_best
 
+"""
+Run SAASBO for a given number of iterations.
 
-def run_saasbo(f, lb, ub, n_evals, n_init, seed=None, alpha=0.1, num_warmup=512, num_samples=256, thinning=16):
+Arguments:
+f: function to minimize. should accept a D-dimensional np.array as argument.
+lb: D-dimensional vector of lower bounds (np.array)
+ub: D-dimensional vector of upper bounds (np.array)
+max_evals: the total evaluation budget
+num_init_evals: the initial num_init_evals query points are chosen at random from the input
+    domain using a Sobol sequence. must satisfy num_init_evals < max_evals.
+seed: random number seed (int or None)
+alpha: positive float that controls the level of sparsity (smaller alpher => more sparsity).
+    defaults to alpha = 0.1.
+num_warmup: the number of warmup samples to use in HMC inference. defaults to 512.
+num_samples: the number of post-warmup samples to use in HMC inference. defaults to 256.
+thinning: a positive integer that controls the fraction of posterior hyperparameter samples
+    that are used to compute the expected improvement. for example thinning==2 will use every
+    other sample. defaults to no thinning (thinning==1).
+"""
+def run_saasbo(f, lb, ub, max_evals, num_init_evals, seed=None, alpha=0.1, num_warmup=512, num_samples=256, thinning=16):
+    if max_evals <= num_init_evals:
+        raise ValueError("Must choose max_evals > num_init_evals.")
+
     ei_y = False
     device = "cpu"
     numpyro.set_platform(device)
@@ -90,11 +111,11 @@ def run_saasbo(f, lb, ub, n_evals, n_init, seed=None, alpha=0.1, num_warmup=512,
         enable_x64()
     numpyro.set_host_device_count(1)
 
-    X = SobolEngine(dimension=len(lb), scramble=True, seed=seed).draw(n=n_init).numpy()
+    X = SobolEngine(dimension=len(lb), scramble=True, seed=seed).draw(n=num_init_evals).numpy()
     Y = np.array([f(lb + (ub - lb) * x) for x in X])
     print(f"Starting from {Y.min().item():.3f}")
 
-    while len(Y) < n_evals:
+    while len(Y) < max_evals:
         print(f"Iteration {len(Y)}", flush=True)
         train_Y = (Y - Y.mean()) / Y.std()
         y_target = train_Y.min().item()
@@ -136,6 +157,7 @@ def run_saasbo(f, lb, ub, n_evals, n_init, seed=None, alpha=0.1, num_warmup=512,
     return lb + (ub - lb) * X, Y
 
 
+# embed the d=6 Hartmann function in D=50 dimensions
 def hartmann6_50(x):
     return Hartmann(6)(torch.tensor([x[19], x[14], x[43], x[37], x[16], x[3]]))
 
@@ -144,11 +166,7 @@ def hartmann6_50(x):
 def main(args):
     lb = np.zeros(50)
     ub = np.ones(50)
-
     num_init_evals = 10
-
-    if args.max_evals <= num_init_evals:
-        raise ValueError("Must choose max_evals > num_init_evals.")
 
     run_saasbo(hartmann6_50, lb, ub, args.max_evals, num_init_evals,
                seed=args.seed, alpha=0.1, num_warmup=256, num_samples=256, thinning=32)

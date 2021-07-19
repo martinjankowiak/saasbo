@@ -9,8 +9,9 @@ import numpy as np
 import numpyro
 import numpyro.distributions as dist
 from numpyro.diagnostics import summary
+from numpyro.util import soft_vmap
 
-from jax import jit, vmap
+from jax import jit
 from jax.scipy.linalg import cho_factor, cho_solve, solve_triangular
 
 from numpyro.infer import MCMC, NUTS
@@ -22,24 +23,8 @@ root_five = math.sqrt(5.0)
 five_thirds = 5.0 / 3.0
 
 
-def get_chunks(L, chunk_size):
-    num_chunks = L // chunk_size
-    chunks = [jnp.arange(i * chunk_size, (i + 1) * chunk_size) for i in range(num_chunks)]
-    if L % chunk_size != 0:
-        chunks.append(np.arange(L - L % chunk_size, L))
-    return chunks
-
-
-# fun should return tuples of arrays
-def chunk_vmap(fun, array, chunk_size=4):
-    L = array[0].shape[0]
-    chunks = get_chunks(L, chunk_size)
-    results = [vmap(fun)(*tuple([a[chunk] for a in array])) for chunk in chunks]
-    num_results = len(results[0])
-    return tuple([jnp.concatenate([r[k] for r in results]) for k in range(num_results)])
-
-
-def kernel_diag(var, inv_length_sq, noise, jitter=1.0e-6, include_noise=True):
+# compute diagonal component of kernel
+def kernel_diag(var, noise, jitter=1.0e-6, include_noise=True):
     if include_noise:
         return var + noise + jitter
     else:
@@ -152,9 +137,10 @@ class SAASGP(object):
 
     # compute cholesky factorization of kernel matrices (necessary to compute posterior predictions)
     def compute_choleskys(self, chunk_size=8):
-        def _cholesky(var, inv_length_sq, noise):
+        def _cholesky(args):
+            var, inv_length_sq, noise = args
             k_XX = self.kernel(self.X_train, self.X_train, var, inv_length_sq, noise, True)
-            return (cho_factor(k_XX, lower=True)[0],)
+            return cho_factor(k_XX, lower=True)[0]
 
         n_samples = (self.num_samples * self.num_chains) // self.thinning
         vmap_args = (
@@ -164,14 +150,14 @@ class SAASGP(object):
             else self.observation_variance * jnp.ones(n_samples),
         )
 
-        self.Ls = chunk_vmap(_cholesky, vmap_args, chunk_size=chunk_size)[0]
+        self.Ls = soft_vmap(_cholesky, vmap_args, batch_ndims=1, chunk_size=chunk_size)
 
     # make predictions at test points X_test for a single set of SAAS hyperparameters
     def predict(self, rng_key, X, Y, X_test, L, var, inv_length_sq, noise):
         k_pX = self.kernel(X_test, X, var, inv_length_sq, noise, False)
         mean = jnp.matmul(k_pX, cho_solve((L, True), Y))
 
-        k_pp = kernel_diag(var, inv_length_sq, noise, include_noise=True)
+        k_pp = kernel_diag(var, noise, include_noise=True)
         L_kXp = solve_triangular(L, jnp.transpose(k_pX), lower=True)
         diag_cov = k_pp - (L_kXp * L_kXp).sum(axis=0)
 
@@ -199,11 +185,11 @@ class SAASGP(object):
             self.Ls,
         )
 
-        predict = lambda rng_key, var, inv_length_sq, noise, L: self.predict(
-            rng_key, self.X_train, self.Y_train, X_test, L, var, inv_length_sq, noise
-        )
+        def _predict(args):
+            rng_key, var, inv_length_sq, noise, L = args
+            return self.predict(rng_key, self.X_train, self.Y_train, X_test, L, var, inv_length_sq, noise)
 
-        mean, var = chunk_vmap(predict, vmap_args, chunk_size=8)
+        mean, var = soft_vmap(_predict, vmap_args, batch_ndims=1, chunk_size=8)
 
         return mean, var
 

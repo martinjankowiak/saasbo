@@ -21,16 +21,7 @@ from numpyro.util import enable_x64
 import numpyro
 
 
-def stddev(x, gp):
-    mu, var = gp.posterior(x)
-    sigma = jnp.sqrt(var)
-    return sigma.mean(axis=0)
-
-
-def stddev_grad(x, gp):
-    return stddev(x, gp).sum()
-
-
+# use gp posterior to compute expected improvement (EI)
 def ei(x, y_target, gp, xi=0.0, return_std=False, ei_y=False):
     mu, var = gp.posterior(x)
     std = jnp.maximum(jnp.sqrt(var), 1e-6)
@@ -47,11 +38,13 @@ def ei(x, y_target, gp, xi=0.0, return_std=False, ei_y=False):
     return values.mean(axis=0)
 
 
+# compute gradient of EI
 def ei_grad(x, y_target, gp, xi=0.0, ei_y=False):
     return ei(x, y_target, gp, xi, ei_y=ei_y).sum()
 
 
-def optimize_ei(y_target, gp, xi=0.0, n_restarts=5, n_init=1000, ei_y=False):
+# helper function for optimizing the EI
+def optimize_ei(y_target, gp, xi=0.0, n_restarts=1, n_init=1000, ei_y=False):
     def negative_ei_and_grad(x, y_target, gp, xi, ei_y):
         """Compute EI and its gradient and then flip the signs since BFGS minimizes"""
         x = jnp.array(x.copy())[None, :]
@@ -60,8 +53,11 @@ def optimize_ei(y_target, gp, xi=0.0, n_restarts=5, n_init=1000, ei_y=False):
 
     dim = gp.X_train.shape[-1]
     X_rand = SobolEngine(dimension=dim, scramble=True).draw(n=n_init).numpy()
+
+    # make sure x_best is in the set of candidate EI maximizers
     x_best = gp.X_train[gp.Y_train.argmin(), :]
     X_rand[0, :] = np.clip(x_best + 0.001 * np.random.randn(1, dim), a_min=0.0, a_max=1.0)
+
     X_rand = jnp.array(X_rand)
 
     ei_rand = ei(X_rand, y_target, gp, ei_y=ei_y)
@@ -84,38 +80,6 @@ def optimize_ei(y_target, gp, xi=0.0, n_restarts=5, n_init=1000, ei_y=False):
             x_best, y_best = x.copy(), fx
 
     return x_best
-
-
-def unconstrained_ei(x, y_target, gp, xi):
-    return -jnp.sum(ei(jax_expit(x), y_target, gp, xi))
-
-
-def ei_min_op(x0, y_target, gp, xi):
-    result = minimize(
-        lambda x: unconstrained_ei(x[None, :], y_target, gp, xi),
-        jnp.array(x0, dtype=np.float64),
-        method="BFGS",
-        options=dict(maxiter=16, line_search_maxiter=3),
-    )
-    return result.x, result.fun, result.nit
-
-
-def unconstrained_optimize_ei(y_target, gp, xi=0.0, n_restarts=5, n_init=1000):
-    dim = gp.X_train.shape[-1]
-    X_rand = jnp.array(SobolEngine(dimension=dim, scramble=True).draw(n=n_init))
-    ei_rand = ei(X_rand, y_target, gp)
-    _, top_inds = lax.top_k(ei_rand, n_restarts)
-    X_init = logit(X_rand[top_inds, :])
-
-    x_best, y_best = None, -float("inf")
-    for x0 in X_init:
-        x, fx, nit = ei_min_op(x0, y_target, gp, xi)
-        fx = -1 * fx  # Back to maximization
-
-        if fx > y_best:
-            x_best, y_best = x.copy(), fx
-
-    return expit(x_best)
 
 
 def run_saasbo(f, lb, ub, n_evals, n_init, seed=None, alpha=0.1, num_warmup=512, num_samples=256, thinning=16):
@@ -151,7 +115,7 @@ def run_saasbo(f, lb, ub, n_evals, n_init, seed=None, alpha=0.1, num_warmup=512,
             print(f"GP fitting took {time.time() - start:.2f} seconds")
 
             start = time.time()
-            x_next = optimize_ei(y_target, gp, xi=0.0, n_restarts=1, n_init=1000, ei_y=ei_y)
+            x_next = optimize_ei(y_target, gp, xi=0.0, n_restarts=1, n_init=5000, ei_y=ei_y)
             print(f"Optimizing EI took {time.time() - start:.2f} seconds")
         except Exception as ex:
             print("EXCEPTION!\n", ex)
@@ -178,8 +142,8 @@ def hartmann6_50(x):
 
 # demonstrate how to run SAASBO on the Hartmann6 function embedded in D=50 dimensions
 def main(args):
-    lb = np.zeros(100)
-    ub = np.ones(100)
+    lb = np.zeros(50)
+    ub = np.ones(50)
 
     num_init_evals = 10
 
@@ -187,7 +151,7 @@ def main(args):
         raise ValueError("Must choose max_evals > num_init_evals.")
 
     run_saasbo(hartmann6_50, lb, ub, args.max_evals, num_init_evals,
-               seed=args.seed, alpha=0.1, num_warmup=256, num_samples=256, thinning=16)
+               seed=args.seed, alpha=0.1, num_warmup=256, num_samples=256, thinning=32)
 
 
 if __name__ == "__main__":
@@ -201,6 +165,6 @@ if __name__ == "__main__":
     numpyro.set_platform(args.device)
     if args.device == "cpu":
         enable_x64()
-    numpyro.set_host_device_count(args.num_chains)
+    numpyro.set_host_device_count(1)
 
     main(args)

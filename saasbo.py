@@ -93,7 +93,7 @@ def run_saasbo(f, lb, ub, max_evals, num_init_evals, seed=None, alpha=0.1, num_w
     num_init_evals: the initial num_init_evals query points are chosen at random from the input
         domain using a Sobol sequence. must satisfy num_init_evals < max_evals.
     seed: random number seed (int or None)
-    alpha: positive float that controls the level of sparsity (smaller alpher => more sparsity).
+    alpha: positive float that controls the level of sparsity (smaller alpha => more sparsity).
         defaults to alpha = 0.1.
     num_warmup: the number of warmup samples to use in HMC inference. defaults to 512.
     num_samples: the number of post-warmup samples to use in HMC inference. defaults to 256.
@@ -144,6 +144,7 @@ def run_saasbo(f, lb, ub, max_evals, num_init_evals, seed=None, alpha=0.1, num_w
                 thinning=thinning,
                 verbose=False,
                 observation_variance=1.e-6,
+                kernel="matern",
             )
 
             # fit SAAS GP to training data

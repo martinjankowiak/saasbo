@@ -195,7 +195,7 @@ class SAASGP(object):
         return mean, var
 
 
-# create artificial dataset for demonstration purposes:w
+# create artificial dataset for demonstration purposes
 def get_data(N_train=200, N_test=200, P=20, sigma_obs=0.1, seed=0):
     np.random.seed(seed)
     N = N_train + N_test

@@ -8,10 +8,8 @@ import jax.lax as lax
 import jax.numpy as jnp
 from jax import value_and_grad
 from jax.scipy.stats import norm
-from jax.scipy.special import expit as jax_expit
 
-from scipy.optimize import fmin_l_bfgs_b, minimize
-from scipy.special import logit, expit
+from scipy.optimize import fmin_l_bfgs_b
 
 import numpy as np
 from saasgp import SAASGP
@@ -81,28 +79,38 @@ def optimize_ei(y_target, gp, xi=0.0, n_restarts=1, n_init=1000, ei_y=False):
 
     return x_best
 
-"""
-Run SAASBO for a given number of iterations.
 
-Arguments:
-f: function to minimize. should accept a D-dimensional np.array as argument.
-lb: D-dimensional vector of lower bounds (np.array)
-ub: D-dimensional vector of upper bounds (np.array)
-max_evals: the total evaluation budget
-num_init_evals: the initial num_init_evals query points are chosen at random from the input
-    domain using a Sobol sequence. must satisfy num_init_evals < max_evals.
-seed: random number seed (int or None)
-alpha: positive float that controls the level of sparsity (smaller alpher => more sparsity).
-    defaults to alpha = 0.1.
-num_warmup: the number of warmup samples to use in HMC inference. defaults to 512.
-num_samples: the number of post-warmup samples to use in HMC inference. defaults to 256.
-thinning: a positive integer that controls the fraction of posterior hyperparameter samples
-    that are used to compute the expected improvement. for example thinning==2 will use every
-    other sample. defaults to no thinning (thinning==1).
-"""
 def run_saasbo(f, lb, ub, max_evals, num_init_evals, seed=None, alpha=0.1, num_warmup=512, num_samples=256, thinning=16):
+    """
+    Run SAASBO for a given number of iterations.
+
+    Arguments:
+    f: function to minimize. should accept a D-dimensional np.array as argument. the input domain of f
+        is assumed to be the D-dimensional rectangular box bounded by lower and upper bounds lb and ub.
+    lb: D-dimensional vector of lower bounds (np.array)
+    ub: D-dimensional vector of upper bounds (np.array)
+    max_evals: the total evaluation budget
+    num_init_evals: the initial num_init_evals query points are chosen at random from the input
+        domain using a Sobol sequence. must satisfy num_init_evals < max_evals.
+    seed: random number seed (int or None)
+    alpha: positive float that controls the level of sparsity (smaller alpher => more sparsity).
+        defaults to alpha = 0.1.
+    num_warmup: the number of warmup samples to use in HMC inference. defaults to 512.
+    num_samples: the number of post-warmup samples to use in HMC inference. defaults to 256.
+    thinning: a positive integer that controls the fraction of posterior hyperparameter samples
+        that are used to compute the expected improvement. for example thinning==2 will use every
+        other sample. defaults to no thinning (thinning==1).
+
+    Returns:
+        X: np.array containing all query points
+        Y: np.array containing all observed function evaluations
+    """
     if max_evals <= num_init_evals:
         raise ValueError("Must choose max_evals > num_init_evals.")
+    if lb.shape != ub.shape or lb.ndim != 1:
+        raise ValueError("The lower/upper bounds lb and ub must have the same shape and be D-dimensional vectors.")
+    if alpha <= 0.0:
+        raise ValueError("The hyperparameter alpha must be positive.")
 
     ei_y = False
     device = "cpu"
@@ -111,38 +119,45 @@ def run_saasbo(f, lb, ub, max_evals, num_init_evals, seed=None, alpha=0.1, num_w
         enable_x64()
     numpyro.set_host_device_count(1)
 
+    # initial queries are drawn from a Sobol sequence
     X = SobolEngine(dimension=len(lb), scramble=True, seed=seed).draw(n=num_init_evals).numpy()
     Y = np.array([f(lb + (ub - lb) * x) for x in X])
-    print(f"Starting from {Y.min().item():.3f}")
+
+    print("Starting SAASBO optimization run.")
+    print(f"First {num_init_evals} queries drawn at random. Best minimum thus far: {Y.min().item():.3f}")
 
     while len(Y) < max_evals:
-        print(f"Iteration {len(Y)}", flush=True)
+        print(f"Starting SAASBO iteration {len(Y)}", flush=True)
+        # standardize training data
         train_Y = (Y - Y.mean()) / Y.std()
         y_target = train_Y.min().item()
 
         try:
             start = time.time()
+            # define GP with SAAS prior
             gp = SAASGP(
                 alpha=alpha,
                 num_warmup=num_warmup,
                 num_samples=num_samples,
-                max_tree_depth=6,
+                max_tree_depth=7,
                 num_chains=1,
                 thinning=thinning,
                 verbose=False,
                 observation_variance=1.e-6,
             )
+
+            # fit SAAS GP to training data
             gp = gp.fit(X, train_Y)
             print(f"GP fitting took {time.time() - start:.2f} seconds")
 
             start = time.time()
+            # do EI optimization using LBFGS
             x_next = optimize_ei(y_target, gp, xi=0.0, n_restarts=1, n_init=5000, ei_y=ei_y)
             print(f"Optimizing EI took {time.time() - start:.2f} seconds")
-        except Exception as ex:
-            print("EXCEPTION!\n", ex)
-            x_next = np.random.rand(
-                len(lb),
-            )  # Random point
+
+        # if for whatever reason we fail to return a query point above we choose one at random from the domain
+        except Exception:
+            x_next = np.random.rand(len(lb))
 
         y_next = f(lb + (ub - lb) * x_next)
 
@@ -150,7 +165,7 @@ def run_saasbo(f, lb, ub, max_evals, num_init_evals, seed=None, alpha=0.1, num_w
         Y = np.hstack((Y, deepcopy(y_next)))
 
         print(f"EI value: {ei(x_next[None, :], y_target, gp).item():.2e}")
-        print(f"Next function value: {y_next:.3f}    Best function value: {Y.min():.3f}")
+        print(f"Observed function value: {y_next:.3f}    Best function value seen thus far: {Y.min():.3f}")
 
         del gp
 
@@ -169,7 +184,7 @@ def main(args):
     num_init_evals = 10
 
     run_saasbo(hartmann6_50, lb, ub, args.max_evals, num_init_evals,
-               seed=args.seed, alpha=0.1, num_warmup=256, num_samples=256, thinning=32)
+               seed=args.seed, alpha=0.01, num_warmup=256, num_samples=256, thinning=32)
 
 
 if __name__ == "__main__":

@@ -72,23 +72,27 @@ def matern_kernel(X, Z, var, inv_length_sq, noise, include_noise):
 class SAASGP(object):
     """
     This class contains the necessary modeling and inference code to fit a gaussian process with a SAAS prior.
+
+    See below for arguments.
     """
     def __init__(
         self,
         alpha=0.1,                 # controls sparsity
-        num_warmup=200,            # number of HMC warmup samples
-        num_samples=200,           # number of post-warmup HMC samples
-        max_tree_depth=8,          # max tree depth used in NUTS
+        num_warmup=256,            # number of HMC warmup samples
+        num_samples=256,           # number of post-warmup HMC samples
+        max_tree_depth=7,          # max tree depth used in NUTS
         num_chains=1,              # number of MCMC chains
         thinning=1,                # thinning > 1 reduces the computational cost at the risk of less robust model inferences
         verbose=True,              # whether to use std out for verbose logging
-        observation_variance=0.0,  # observation variance to use; this is inferred if observation_variance==0.0
+        observation_variance=0.0,  # observation variance to use; this scalar value is inferred if observation_variance==0.0
         kernel="matern"            # GP kernel to use (matern or rbf)
     ):
         if alpha <= 0.0:
             raise ValueError("The hyperparameter alpha should be positive.")
         if observation_variance < 0.0:
             raise ValueError("The hyperparameter observation_variance should be non-negative.")
+        if kernel not in ['matern', 'rbf']:
+            raise ValueError("Allowed kernels are matern and rbf.")
         for i in [num_warmup, num_samples, max_tree_depth, num_chains, thinning]:
             if not isinstance(i, int) or i <= 0:
                 raise ValueError("The hyperparameters num_warmup, num_samples, max_tree_depth, " +
@@ -106,6 +110,8 @@ class SAASGP(object):
         self.learn_noise = (observation_variance == 0.0)
         self.Ls = None
 
+    # define the surrogate model. users who want to modify e.g. the prior on the kernel variance
+    # should make their modifications here.
     def model(self, X, Y):
         N, P = X.shape
 
@@ -123,6 +129,7 @@ class SAASGP(object):
 
         numpyro.sample("Y", dist.MultivariateNormal(loc=jnp.zeros(N), covariance_matrix=k), obs=Y)
 
+    # run gradient-based NUTS MCMC inference
     def run_inference(self, rng_key, X, Y):
         start = time.time()
         kernel = NUTS(self.model, max_tree_depth=self.max_tree_depth)
@@ -143,6 +150,7 @@ class SAASGP(object):
 
         return chain_samples, flat_samples, flat_summary
 
+    # compute cholesky factorization of kernel matrices (necessary to compute posterior predictions)
     def compute_choleskys(self, chunk_size=8):
         def _cholesky(var, inv_length_sq, noise):
             k_XX = self.kernel(self.X_train, self.X_train, var, inv_length_sq, noise, True)
@@ -158,6 +166,7 @@ class SAASGP(object):
 
         self.Ls = chunk_vmap(_cholesky, vmap_args, chunk_size=chunk_size)[0]
 
+    # make predictions at test points X_test for a single set of SAAS hyperparameters
     def predict(self, rng_key, X, Y, X_test, L, var, inv_length_sq, noise):
         k_pX = self.kernel(X_test, X, var, inv_length_sq, noise, False)
         mean = jnp.matmul(k_pX, cho_solve((L, True), Y))
@@ -168,12 +177,14 @@ class SAASGP(object):
 
         return mean, diag_cov
 
+    # fit SAASGP to training data
     def fit(self, X_train, Y_train, seed=0):
         self.X_train, self.Y_train = X_train.copy(), Y_train.copy()
         self.rng_key_hmc, self.rng_key_predict = random.split(random.PRNGKey(seed), 2)
         self.chain_samples, self.flat_samples, self.summary = self.run_inference(self.rng_key_hmc, X_train, Y_train)
         return self
 
+    # compute predictions at X_test using inferred SAAS hyperparameters
     def posterior(self, X_test):
         if self.Ls is None:
             self.compute_choleskys(chunk_size=8)
@@ -197,6 +208,7 @@ class SAASGP(object):
         return mean, var
 
 
+# create artificial dataset for demonstration purposes:w
 def get_data(N_train=200, N_test=200, P=20, sigma_obs=0.1, seed=0):
     np.random.seed(seed)
     N = N_train + N_test
@@ -219,6 +231,7 @@ def main(args):
         N_train=args.num_data, P=args.P, seed=args.seed
     )
 
+    # define SAASGP
     gp = SAASGP(
         alpha=args.alpha,
         num_warmup=args.num_warmup,
@@ -229,13 +242,17 @@ def main(args):
         kernel=args.kernel,
     )
 
+    # fit SAASGP to training data
     gp = gp.fit(X_train, Y_train)
 
+    # report inference stats (r_hat should be close to 1.0 if inference results are to be trusted)
     for k, v in gp.summary.items():
         print("median_r_hat[{}]: {:.4f}".format(k, np.median(v["r_hat"])))
 
+    # compute predictions at test points X_test for each posterior sample
     mean, var = gp.posterior(X_test)
 
+    # compare predictions to actual Y_test
     test_rmse = np.sqrt(np.mean(np.square(Y_test - np.mean(mean, axis=0))))
     test_ll = -0.5 * np.square(Y_test - mean) / var - 0.5 * np.log(2.0 * np.pi * var)
     test_ll = np.mean(logsumexp(test_ll, axis=0)) - np.log(mean.shape[0])
@@ -245,14 +262,14 @@ def main(args):
 if __name__ == "__main__":
     assert numpyro.__version__.startswith("0.5")
     parser = argparse.ArgumentParser(description="We demonstrate how to fit a SAASGP.")
-    parser.add_argument("-n", "--num-samples", nargs="?", default=128, type=int)
-    parser.add_argument("--P", default=32, type=int)
-    parser.add_argument("--num-warmup", nargs="?", default=128, type=int)
-    parser.add_argument("--num-chains", nargs="?", default=1, type=int)
-    parser.add_argument("--num-data", nargs="?", default=64, type=int)
-    parser.add_argument("--mtd", default=7, type=int)
+    parser.add_argument("-n", "--num-samples", default=128, type=int)
+    parser.add_argument("--P", default=32, type=int, help="dimension of input space")
+    parser.add_argument("--num-warmup", default=128, type=int)
+    parser.add_argument("--num-chains",  default=1, type=int)
+    parser.add_argument("--num-data", default=64, type=int)
+    parser.add_argument("--mtd", default=7, type=int, help="max tree depth (NUTS hyperparameter)")
     parser.add_argument("--thinning", default=4, type=int)
-    parser.add_argument("--alpha", default=0.01, type=float)
+    parser.add_argument("--alpha", default=0.01, type=float, help="controls SAAS sparsity level")
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument("--kernel", default="rbf", type=str, choices=["rbf", "matern"])
     parser.add_argument("--device", default="cpu", type=str, help='use "cpu" or "gpu".')

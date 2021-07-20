@@ -3,19 +3,19 @@ import argparse
 import time
 from functools import partial
 
+import numpy as np
+
 import jax.numpy as jnp
 import jax.random as random
-import numpy as np
-import numpyro
-import numpyro.distributions as dist
-from numpyro.diagnostics import summary
-from numpyro.util import soft_vmap
-
 from jax import jit
 from jax.scipy.linalg import cho_factor, cho_solve, solve_triangular
 
+import numpyro
+import numpyro.distributions as dist
+from numpyro.diagnostics import summary
+from numpyro.util import soft_vmap, enable_x64
 from numpyro.infer import MCMC, NUTS
-from numpyro.util import enable_x64
+
 from scipy.special import logsumexp
 
 
@@ -68,7 +68,7 @@ class SAASGP(object):
         max_tree_depth=7,          # max tree depth used in NUTS
         num_chains=1,              # number of MCMC chains
         thinning=1,                # thinning > 1 reduces the computational cost at the risk of less robust model inferences
-        verbose=True,              # whether to use std out for verbose logging
+        verbose=True,              # whether to use stdout for verbose logging
         observation_variance=0.0,  # observation variance to use; this scalar value is inferred if observation_variance==0.0
         kernel="matern"            # GP kernel to use (matern or rbf)
     ):
@@ -101,17 +101,14 @@ class SAASGP(object):
         N, P = X.shape
 
         var = numpyro.sample("kernel_var", dist.LogNormal(0.0, 10.0))
-        if self.learn_noise:
-            noise = numpyro.sample("kernel_noise", dist.LogNormal(0.0, 10.0))
-        else:
-            noise = self.observation_variance
-
+        noise = numpyro.sample("kernel_noise", dist.LogNormal(0.0, 10.0)) if self.learn_noise else self.observation_variance
         tausq = numpyro.sample("kernel_tausq", dist.HalfCauchy(self.alpha))
 
+        # note we use deterministic to reparameterize the geometry
         inv_length_sq = numpyro.sample("_kernel_inv_length_sq", dist.HalfCauchy(jnp.ones(P)))
         inv_length_sq = numpyro.deterministic("kernel_inv_length_sq", tausq * inv_length_sq)
-        k = self.kernel(X, X, var, inv_length_sq, noise, True)
 
+        k = self.kernel(X, X, var, inv_length_sq, noise, True)
         numpyro.sample("Y", dist.MultivariateNormal(loc=jnp.zeros(N), covariance_matrix=k), obs=Y)
 
     # run gradient-based NUTS MCMC inference
@@ -214,9 +211,7 @@ def get_data(N_train=200, N_test=200, P=20, sigma_obs=0.1, seed=0):
 
 # We demonstrate how to fit a GP equipped with a SAAS prior.
 def main(args):
-    X_train, Y_train, X_test, Y_test = get_data(
-        N_train=args.num_data, P=args.P, seed=args.seed
-    )
+    X_train, Y_train, X_test, Y_test = get_data(N_train=args.num_data, P=args.P, seed=args.seed)
 
     # define SAASGP
     gp = SAASGP(

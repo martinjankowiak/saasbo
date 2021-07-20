@@ -1,7 +1,7 @@
 import argparse
+import warnings
 
-import torch
-from torch.quasirandom import SobolEngine
+from scipy.stats import qmc
 from hartmann import hartmann6_50
 
 import jax.lax as lax
@@ -50,7 +50,8 @@ def optimize_ei(y_target, gp, xi=0.0, n_restarts=1, n_init=1000, ei_y=False):
         return -1 * ei_val.item(), -1 * np.array(ei_val_grad)
 
     dim = gp.X_train.shape[-1]
-    X_rand = SobolEngine(dimension=dim, scramble=True).draw(n=n_init).numpy()
+    with warnings.catch_warnings(record=True):  # suppress annoying qmc.Sobol UserWarning
+        X_rand = qmc.Sobol(dim, scramble=True).random(n_init)
 
     # make sure x_best is in the set of candidate EI maximizers
     x_best = gp.X_train[gp.Y_train.argmin(), :]
@@ -120,7 +121,9 @@ def run_saasbo(f, lb, ub, max_evals, num_init_evals, seed=None, alpha=0.1, num_w
     numpyro.set_host_device_count(1)
 
     # initial queries are drawn from a Sobol sequence
-    X = SobolEngine(dimension=len(lb), scramble=True, seed=seed).draw(n=num_init_evals).numpy()
+    with warnings.catch_warnings(record=True):  # suppress annoying qmc.Sobol UserWarning
+        X = qmc.Sobol(len(lb), scramble=True).random(num_init_evals)
+
     Y = np.array([f(lb + (ub - lb) * x) for x in X])
 
     print("Starting SAASBO optimization run.")

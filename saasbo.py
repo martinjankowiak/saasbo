@@ -1,26 +1,27 @@
 import argparse
 import warnings
+import time
+from copy import deepcopy
 
+import numpy as np
+
+from scipy.optimize import fmin_l_bfgs_b
 from scipy.stats import qmc
-from hartmann import hartmann6_50
 
 import jax.lax as lax
 import jax.numpy as jnp
 from jax import value_and_grad
 from jax.scipy.stats import norm
 
-from scipy.optimize import fmin_l_bfgs_b
-
-import numpy as np
-from saasgp import SAASGP
-from copy import deepcopy
-import time
-from numpyro.util import enable_x64
 import numpyro
+from numpyro.util import enable_x64
+
+from saasgp import SAASGP
+from hartmann import hartmann6_50
 
 
 # use gp posterior to compute expected improvement (EI)
-def ei(x, y_target, gp, xi=0.0, return_std=False, ei_y=False):
+def ei(x, y_target, gp, xi=0.0, ei_y=False):
     mu, var = gp.posterior(x)
     std = jnp.maximum(jnp.sqrt(var), 1e-6)
     improve = y_target - xi - mu
@@ -31,8 +32,7 @@ def ei(x, y_target, gp, xi=0.0, return_std=False, ei_y=False):
     values = jnp.nan_to_num(exploit + explore, nan=0.0)
     if ei_y:
         values = values - mu
-    if return_std:
-        return values.mean(axis=0), std.mean(axis=0)
+
     return values.mean(axis=0)
 
 
@@ -44,7 +44,7 @@ def ei_grad(x, y_target, gp, xi=0.0, ei_y=False):
 # helper function for optimizing the EI
 def optimize_ei(y_target, gp, xi=0.0, n_restarts=1, n_init=1000, ei_y=False):
     def negative_ei_and_grad(x, y_target, gp, xi, ei_y):
-        """Compute EI and its gradient and then flip the signs since BFGS minimizes"""
+        # Compute EI and its gradient and then flip the signs since BFGS minimizes
         x = jnp.array(x.copy())[None, :]
         ei_val, ei_val_grad = value_and_grad(ei_grad)(x, y_target, gp, xi, ei_y)
         return -1 * ei_val.item(), -1 * np.array(ei_val_grad)
@@ -81,9 +81,10 @@ def optimize_ei(y_target, gp, xi=0.0, n_restarts=1, n_init=1000, ei_y=False):
     return x_best
 
 
-def run_saasbo(f, lb, ub, max_evals, num_init_evals, seed=None, alpha=0.1, num_warmup=512, num_samples=256, thinning=16):
+def run_saasbo(f, lb, ub, max_evals, num_init_evals,
+               seed=None, alpha=0.1, num_warmup=512, num_samples=256, thinning=16, device="cpu"):
     """
-    Run SAASBO for a given number of iterations.
+    Run SAASBO and approximately minimize f.
 
     Arguments:
     f: function to minimize. should accept a D-dimensional np.array as argument. the input domain of f
@@ -93,7 +94,7 @@ def run_saasbo(f, lb, ub, max_evals, num_init_evals, seed=None, alpha=0.1, num_w
     max_evals: the total evaluation budget
     num_init_evals: the initial num_init_evals query points are chosen at random from the input
         domain using a Sobol sequence. must satisfy num_init_evals < max_evals.
-    seed: random number seed (int or None)
+    seed: random number seed (int or None); defaults to None
     alpha: positive float that controls the level of sparsity (smaller alpha => more sparsity).
         defaults to alpha = 0.1.
     num_warmup: the number of warmup samples to use in HMC inference. defaults to 512.
@@ -101,10 +102,11 @@ def run_saasbo(f, lb, ub, max_evals, num_init_evals, seed=None, alpha=0.1, num_w
     thinning: a positive integer that controls the fraction of posterior hyperparameter samples
         that are used to compute the expected improvement. for example thinning==2 will use every
         other sample. defaults to no thinning (thinning==1).
+    device: whether to use cpu or gpu. defaults to "cpu".
 
     Returns:
-        X: np.array containing all query points
-        Y: np.array containing all observed function evaluations
+        X: np.array containing all query points (of which there are max_evals many)
+        Y: np.array containing all observed function evaluations (of which there are max_evals many)
     """
     if max_evals <= num_init_evals:
         raise ValueError("Must choose max_evals > num_init_evals.")
@@ -112,12 +114,12 @@ def run_saasbo(f, lb, ub, max_evals, num_init_evals, seed=None, alpha=0.1, num_w
         raise ValueError("The lower/upper bounds lb and ub must have the same shape and be D-dimensional vectors.")
     if alpha <= 0.0:
         raise ValueError("The hyperparameter alpha must be positive.")
+    if device not in ['cpu', 'gpu']:
+        raise ValueError("The device must be cpu or gpu.")
 
     ei_y = False
-    device = "cpu"
     numpyro.set_platform(device)
-    if device == "cpu":
-        enable_x64()
+    enable_x64()
     numpyro.set_host_device_count(1)
 
     # initial queries are drawn from a Sobol sequence
@@ -163,6 +165,7 @@ def run_saasbo(f, lb, ub, max_evals, num_init_evals, seed=None, alpha=0.1, num_w
         except Exception:
             x_next = np.random.rand(len(lb))
 
+        # transform to original coordinates
         y_next = f(lb + (ub - lb) * x_next)
 
         X = np.vstack((X, deepcopy(x_next[None, :])))
@@ -180,7 +183,7 @@ def run_saasbo(f, lb, ub, max_evals, num_init_evals, seed=None, alpha=0.1, num_w
 def main(args):
     lb = np.zeros(50)
     ub = np.ones(50)
-    num_init_evals = 10
+    num_init_evals = 15
 
     run_saasbo(hartmann6_50, lb, ub, args.max_evals, num_init_evals,
                seed=args.seed, alpha=0.01, num_warmup=256, num_samples=256, thinning=32)
@@ -190,13 +193,12 @@ if __name__ == "__main__":
     assert numpyro.__version__.startswith("0.7")
     parser = argparse.ArgumentParser(description="We demonstrate how to run SAASBO.")
     parser.add_argument("--seed", default=0, type=int)
-    parser.add_argument("--max-evals", default=20, type=int)
+    parser.add_argument("--max-evals", default=25, type=int)
     parser.add_argument("--device", default="cpu", type=str, help='use "cpu" or "gpu".')
     args = parser.parse_args()
 
     numpyro.set_platform(args.device)
-    if args.device == "cpu":
-        enable_x64()
+    enable_x64()
     numpyro.set_host_device_count(1)
 
     main(args)

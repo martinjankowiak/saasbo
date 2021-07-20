@@ -2,7 +2,7 @@ import argparse
 
 import torch
 from torch.quasirandom import SobolEngine
-from botorch.test_functions import Hartmann
+from hartmann import hartmann6_50
 
 import jax.lax as lax
 import jax.numpy as jnp
@@ -171,11 +171,6 @@ def run_saasbo(f, lb, ub, max_evals, num_init_evals, seed=None, alpha=0.1, num_w
         del gp
 
     return lb + (ub - lb) * X, Y
-
-
-# embed the d=6 Hartmann function in D=50 dimensions
-def hartmann6_50(x):
-    return Hartmann(6)(torch.tensor([x[19], x[14], x[43], x[37], x[16], x[3]]))
 
 
 # demonstrate how to run SAASBO on the Hartmann6 function embedded in D=50 dimensions

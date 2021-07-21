@@ -1,4 +1,3 @@
-import argparse
 import warnings
 import time
 from copy import deepcopy
@@ -17,7 +16,6 @@ import numpyro
 from numpyro.util import enable_x64
 
 from saasgp import SAASGP
-from hartmann import hartmann6_50
 
 
 # use gp posterior to compute expected improvement (EI)
@@ -177,28 +175,3 @@ def run_saasbo(f, lb, ub, max_evals, num_init_evals,
         del gp
 
     return lb + (ub - lb) * X, Y
-
-
-# demonstrate how to run SAASBO on the Hartmann6 function embedded in D=50 dimensions
-def main(args):
-    lb = np.zeros(50)
-    ub = np.ones(50)
-    num_init_evals = 15
-
-    run_saasbo(hartmann6_50, lb, ub, args.max_evals, num_init_evals,
-               seed=args.seed, alpha=0.01, num_warmup=256, num_samples=256, thinning=32)
-
-
-if __name__ == "__main__":
-    assert numpyro.__version__.startswith("0.7")
-    parser = argparse.ArgumentParser(description="We demonstrate how to run SAASBO.")
-    parser.add_argument("--seed", default=0, type=int)
-    parser.add_argument("--max-evals", default=25, type=int)
-    parser.add_argument("--device", default="cpu", type=str, help='use "cpu" or "gpu".')
-    args = parser.parse_args()
-
-    numpyro.set_platform(args.device)
-    enable_x64()
-    numpyro.set_host_device_count(1)
-
-    main(args)

@@ -1,10 +1,8 @@
 import argparse
 
 import numpy as np
-
 import numpyro
 from numpyro.util import enable_x64
-
 from scipy.special import logsumexp
 
 from saasgp import SAASGP
@@ -65,7 +63,7 @@ if __name__ == "__main__":
     parser.add_argument("-n", "--num-samples", default=128, type=int)
     parser.add_argument("--P", default=32, type=int, help="dimension of input space")
     parser.add_argument("--num-warmup", default=128, type=int)
-    parser.add_argument("--num-chains",  default=1, type=int)
+    parser.add_argument("--num-chains", default=1, type=int)
     parser.add_argument("--num-data", default=64, type=int)
     parser.add_argument("--mtd", default=7, type=int, help="max tree depth (NUTS hyperparameter)")
     parser.add_argument("--thinning", default=4, type=int)

@@ -2,22 +2,35 @@ import math
 import time
 from functools import partial
 
-import numpy as np
-
 import jax.numpy as jnp
 import jax.random as random
-from jax import jit
-from jax.scipy.linalg import cho_factor, cho_solve, solve_triangular
-
+import numpy as np
 import numpyro
 import numpyro.distributions as dist
+from jax import jit, vmap
+from jax.scipy.linalg import cho_factor, cho_solve, solve_triangular
 from numpyro.diagnostics import summary
-from numpyro.util import soft_vmap
 from numpyro.infer import MCMC, NUTS
-
 
 root_five = math.sqrt(5.0)
 five_thirds = 5.0 / 3.0
+
+
+def get_chunks(L, chunk_size):
+    num_chunks = L // chunk_size
+    chunks = [jnp.arange(i * chunk_size, (i + 1) * chunk_size) for i in range(num_chunks)]
+    if L % chunk_size != 0:
+        chunks.append(np.arange(L - L % chunk_size, L))
+    return chunks
+
+
+# fun should return tuples of arrays
+def chunk_vmap(fun, array, chunk_size=4):
+    L = array[0].shape[0]
+    chunks = get_chunks(L, chunk_size)
+    results = [vmap(fun)(*tuple([a[chunk] for a in array])) for chunk in chunks]
+    num_results = len(results[0])
+    return tuple([jnp.concatenate([r[k] for r in results]) for k in range(num_results)])
 
 
 # compute diagonal component of kernel
@@ -57,28 +70,31 @@ class SAASGP(object):
 
     See below for arguments.
     """
+
     def __init__(
         self,
-        alpha=0.1,                 # controls sparsity
-        num_warmup=256,            # number of HMC warmup samples
-        num_samples=256,           # number of post-warmup HMC samples
-        max_tree_depth=7,          # max tree depth used in NUTS
-        num_chains=1,              # number of MCMC chains
-        thinning=1,                # thinning > 1 reduces the computational cost at the risk of less robust model inferences
-        verbose=True,              # whether to use stdout for verbose logging
+        alpha=0.1,  # controls sparsity
+        num_warmup=512,  # number of HMC warmup samples
+        num_samples=256,  # number of post-warmup HMC samples
+        max_tree_depth=7,  # max tree depth used in NUTS
+        num_chains=1,  # number of MCMC chains
+        thinning=16,  # thinning > 1 reduces the computational cost at the risk of less robust model inferences
+        verbose=True,  # whether to use stdout for verbose logging
         observation_variance=0.0,  # observation variance to use; this scalar value is inferred if observation_variance==0.0
-        kernel="matern"            # GP kernel to use (matern or rbf)
+        kernel="matern",  # GP kernel to use (matern or rbf)
     ):
         if alpha <= 0.0:
             raise ValueError("The hyperparameter alpha should be positive.")
         if observation_variance < 0.0:
             raise ValueError("The hyperparameter observation_variance should be non-negative.")
-        if kernel not in ['matern', 'rbf']:
+        if kernel not in ["matern", "rbf"]:
             raise ValueError("Allowed kernels are matern and rbf.")
         for i in [num_warmup, num_samples, max_tree_depth, num_chains, thinning]:
             if not isinstance(i, int) or i <= 0:
-                raise ValueError("The hyperparameters num_warmup, num_samples, max_tree_depth, " +
-                                 "num_chains, and thinning should be positive integers.")
+                raise ValueError(
+                    "The hyperparameters num_warmup, num_samples, max_tree_depth, "
+                    + "num_chains, and thinning should be positive integers."
+                )
 
         self.alpha = alpha
         self.num_warmup = num_warmup
@@ -89,7 +105,7 @@ class SAASGP(object):
         self.thinning = thinning
         self.verbose = verbose
         self.observation_variance = observation_variance
-        self.learn_noise = (observation_variance == 0.0)
+        self.learn_noise = observation_variance == 0.0
         self.Ls = None
 
     # define the surrogate model. users who want to modify e.g. the prior on the kernel variance
@@ -98,7 +114,9 @@ class SAASGP(object):
         N, P = X.shape
 
         var = numpyro.sample("kernel_var", dist.LogNormal(0.0, 10.0))
-        noise = numpyro.sample("kernel_noise", dist.LogNormal(0.0, 10.0)) if self.learn_noise else self.observation_variance
+        noise = (
+            numpyro.sample("kernel_noise", dist.LogNormal(0.0, 10.0)) if self.learn_noise else self.observation_variance
+        )
         tausq = numpyro.sample("kernel_tausq", dist.HalfCauchy(self.alpha))
 
         # note we use deterministic to reparameterize the geometry
@@ -112,8 +130,13 @@ class SAASGP(object):
     def run_inference(self, rng_key, X, Y):
         start = time.time()
         kernel = NUTS(self.model, max_tree_depth=self.max_tree_depth)
-        mcmc = MCMC(kernel, num_warmup=self.num_warmup, num_samples=self.num_samples,
-                    num_chains=self.num_chains, progress_bar=self.verbose)
+        mcmc = MCMC(
+            kernel,
+            num_warmup=self.num_warmup,
+            num_samples=self.num_samples,
+            num_chains=self.num_chains,
+            progress_bar=self.verbose,
+        )
         mcmc.run(rng_key, X, Y)
 
         flat_samples = mcmc.get_samples(group_by_chain=False)
@@ -121,9 +144,12 @@ class SAASGP(object):
         flat_summary = summary(flat_samples, prob=0.90, group_by_chain=False)
 
         if self.verbose:
-            rhat = flat_summary['kernel_inv_length_sq']['r_hat']
-            print("[kernel_inv_length_sq] r_hat min/max/median:  {:.3f}  {:.3f}  {:.3f}".format(
-                  np.min(rhat), np.max(rhat), np.median(rhat)))
+            rhat = flat_summary["kernel_inv_length_sq"]["r_hat"]
+            print(
+                "[kernel_inv_length_sq] r_hat min/max/median:  {:.3f}  {:.3f}  {:.3f}".format(
+                    np.min(rhat), np.max(rhat), np.median(rhat)
+                )
+            )
 
             mcmc.print_summary(exclude_deterministic=False)
             print("\nMCMC elapsed time:", time.time() - start)
@@ -132,20 +158,20 @@ class SAASGP(object):
 
     # compute cholesky factorization of kernel matrices (necessary to compute posterior predictions)
     def compute_choleskys(self, chunk_size=8):
-        def _cholesky(args):
-            var, inv_length_sq, noise = args
+        def _cholesky(var, inv_length_sq, noise):
             k_XX = self.kernel(self.X_train, self.X_train, var, inv_length_sq, noise, True)
-            return cho_factor(k_XX, lower=True)[0]
+            return (cho_factor(k_XX, lower=True)[0],)
 
         n_samples = (self.num_samples * self.num_chains) // self.thinning
         vmap_args = (
             self.flat_samples["kernel_var"][:: self.thinning],
             self.flat_samples["kernel_inv_length_sq"][:: self.thinning],
-            self.flat_samples["kernel_noise"][:: self.thinning] if self.learn_noise
+            self.flat_samples["kernel_noise"][:: self.thinning]
+            if self.learn_noise
             else self.observation_variance * jnp.ones(n_samples),
         )
 
-        self.Ls = soft_vmap(_cholesky, vmap_args, batch_ndims=1, chunk_size=chunk_size)
+        self.Ls = chunk_vmap(_cholesky, vmap_args, chunk_size=chunk_size)[0]
 
     # make predictions at test points X_test for a single set of SAAS hyperparameters
     def predict(self, rng_key, X, Y, X_test, L, var, inv_length_sq, noise):
@@ -175,15 +201,14 @@ class SAASGP(object):
             random.split(self.rng_key_predict, n_samples),
             self.flat_samples["kernel_var"][:: self.thinning],
             self.flat_samples["kernel_inv_length_sq"][:: self.thinning],
-            self.flat_samples["kernel_noise"][:: self.thinning] if self.learn_noise
-            else self.observation_variance * jnp.ones(n_samples),
+            self.flat_samples["kernel_noise"][:: self.thinning] if self.learn_noise else 1e-6 * jnp.ones(n_samples),
             self.Ls,
         )
 
-        def _predict(args):
-            rng_key, var, inv_length_sq, noise, L = args
-            return self.predict(rng_key, self.X_train, self.Y_train, X_test, L, var, inv_length_sq, noise)
+        predict = lambda rng_key, var, inv_length_sq, noise, L: self.predict(
+            rng_key, self.X_train, self.Y_train, X_test, L, var, inv_length_sq, noise
+        )
 
-        mean, var = soft_vmap(_predict, vmap_args, batch_ndims=1, chunk_size=8)
+        mean, var = chunk_vmap(predict, vmap_args, chunk_size=8)
 
         return mean, var

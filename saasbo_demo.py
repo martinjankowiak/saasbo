@@ -12,7 +12,7 @@ from saasbo import run_saasbo
 def main(args):
     lb = np.zeros(50)
     ub = np.ones(50)
-    num_init_evals = 15
+    num_init_evals = 20
 
     run_saasbo(
         hartmann6_50,
@@ -33,7 +33,7 @@ if __name__ == "__main__":
     assert numpyro.__version__.startswith("0.7")
     parser = argparse.ArgumentParser(description="We demonstrate how to run SAASBO.")
     parser.add_argument("--seed", default=0, type=int)
-    parser.add_argument("--max-evals", default=25, type=int)
+    parser.add_argument("--max-evals", default=50, type=int)
     parser.add_argument("--device", default="cpu", type=str, help='use "cpu" or "gpu".')
     args = parser.parse_args()
 

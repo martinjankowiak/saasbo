@@ -1,3 +1,8 @@
+import jax
+from jax import vmap
+import jax.numpy as jnp
+
+
 def get_chunks(L, chunk_size):
     num_chunks = L // chunk_size
     chunks = [jnp.arange(i * chunk_size, (i + 1) * chunk_size) for i in range(num_chunks)]
